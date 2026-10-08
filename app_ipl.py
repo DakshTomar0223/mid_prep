@@ -1,4 +1,5 @@
 import os
+import sys
 import json
 import pickle
 import numpy as np
@@ -7,6 +8,14 @@ import streamlit as st
 from sklearn.ensemble import AdaBoostRegressor
 from sklearn.tree import DecisionTreeRegressor
 from src.optimizer import select_dream11_team
+
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+sys.path.append(os.path.abspath(os.path.dirname(__file__)))
+
+try:
+    from src.optimizer import select_dream11_team
+except ModuleNotFoundError:
+    from optimizer import select_dream11_team
 
 st.set_page_config(page_title="CynapticsAI - Dream11 Predictor", layout="wide")
 
