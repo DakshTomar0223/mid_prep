@@ -1,68 +1,115 @@
 import os
-import os
 import sys
-
-# 1. Update Python path FIRST (BEFORE any other imports)
-current_dir = os.path.dirname(os.path.abspath(__file__))
-parent_dir = os.path.dirname(current_dir)
-
-for path in [current_dir, parent_dir]:
-    if path not in sys.path:
-        sys.path.insert(0, path)
-
-# 2. NOW perform imports
 import json
 import pickle
 import numpy as np
 import pandas as pd
 import streamlit as st
+import pulp
 from sklearn.ensemble import AdaBoostRegressor
 from sklearn.tree import DecisionTreeRegressor
 
-# 3. Import optimizer with fallback
-try:
-    from src.optimizer import select_dream11_team
-except ModuleNotFoundError:
-    from optimizer import select_dream11_team
-st.set_page_config(page_title="CynapticsAI - Dream11 Predictor", layout="wide")
+# =========================================================
+# 1. DYNAMIC PATH RESOLUTION (Fixes Streamlit Cloud Paths)
+# =========================================================
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT = os.path.abspath(os.path.join(CURRENT_DIR, ".."))
 
-# Ensure required directories exist
-os.makedirs("src/model_artifacts", exist_ok=True)
-os.makedirs("src/data/processed", exist_ok=True)
+def resolve_path(relative_path):
+    """Resolves relative file paths whether running from root or mid_prep/."""
+    path_from_root = os.path.join(REPO_ROOT, relative_path)
+    path_from_curr = os.path.join(CURRENT_DIR, relative_path)
+    if os.path.exists(path_from_root):
+        return path_from_root
+    elif os.path.exists(path_from_curr):
+        return path_from_curr
+    return path_from_root
 
-# ---------------------------------------------------------
-# Load Data Helper
-# ---------------------------------------------------------
+CONTAINER_PATH = resolve_path("data/processed/player_containers.json")
+MODEL_ARTIFACTS_DIR = resolve_path("src/model_artifacts")
+PROCESSED_DATA_DIR = resolve_path("src/data/processed")
+
+# Ensure required directories exist locally
+os.makedirs(MODEL_ARTIFACTS_DIR, exist_ok=True)
+os.makedirs(PROCESSED_DATA_DIR, exist_ok=True)
+
+# =========================================================
+# 2. EMBEDDED OPTIMIZER ENGINE (Dream11 Rules)
+# =========================================================
+def select_dream11_team(df, points_col):
+    """
+    Selects 11 players maximizing `points_col` subject to Dream11 rules:
+    - Exactly 11 players
+    - 1 to 8 players for BAT, BOWL, AR, WK
+    - At least 1 player from each team
+    """
+    match_df = df.copy().reset_index(drop=True)
+    prob = pulp.LpProblem("Dream11_Selection", pulp.LpMaximize)
+    
+    indices = match_df.index
+    x = {i: pulp.LpVariable(f"x_{i}", cat="Binary") for i in indices}
+    
+    # Maximize total fantasy points
+    prob += pulp.lpSum([x[i] * match_df.loc[i, points_col] for i in indices])
+    
+    # Constraint 1: Exactly 11 players
+    prob += pulp.lpSum([x[i] for i in indices]) == 11
+    
+    # Constraint 2: Role composition limits (1 to 8 per role)
+    roles = ['BAT', 'BOWL', 'AR', 'WK']
+    for role in roles:
+        role_indices = match_df[match_df['role'].astype(str).str.upper() == role].index
+        if len(role_indices) > 0:
+            prob += pulp.lpSum([x[i] for i in role_indices]) >= 1
+            prob += pulp.lpSum([x[i] for i in role_indices]) <= 8
+
+    # Constraint 3: At least 1 player from each team
+    teams = match_df['team'].unique()
+    for t in teams:
+        team_indices = match_df[match_df['team'] == t].index
+        prob += pulp.lpSum([x[i] for i in team_indices]) >= 1
+
+    prob.solve(pulp.PULP_CBC_CMD(msg=0))
+    selected_indices = [i for i in indices if pulp.value(x[i]) == 1]
+    return match_df.loc[selected_indices].sort_values(by=points_col, ascending=False)
+
+# =========================================================
+# 3. DATA LOADING & CACHING
+# =========================================================
 @st.cache_data
 def load_processed_data():
-    container_path = "./data/processed/player_containers.json"
-    if not os.path.exists(container_path):
+    if not os.path.exists(CONTAINER_PATH):
         return pd.DataFrame()
-    with open(container_path, 'r') as f:
+        
+    with open(CONTAINER_PATH, 'r') as f:
         containers = json.load(f)
         
     records = []
     for c in containers:
         rec = {
-            "player_name": c["player_name"],
-            "match_date": c["match_date"],
+            "player_name": c.get("player_name", "Unknown"),
+            "match_date": c.get("match_date", "2024-01-01"),
             "venue": c.get("venue", "Unknown"),
             "target_points": float(c.get("target_points", 0.0)),
             "team": c.get("team", "Team A"),
             "role": c.get("role", "AR")
         }
-        rec.update(c["features"])
+        if "features" in c and isinstance(c["features"], dict):
+            rec.update(c["features"])
         records.append(rec)
+        
     df = pd.DataFrame(records)
-    df['match_date'] = pd.to_datetime(df['match_date'])
+    if not df.empty and 'match_date' in df.columns:
+        df['match_date'] = pd.to_datetime(df['match_date'])
     return df
 
 df_all = load_processed_data()
 
-# ---------------------------------------------------------
-# Sidebar Navigation
-# ---------------------------------------------------------
-st.sidebar.title("CynapticsAI Dream11")
+# =========================================================
+# 4. STREAMLIT APP NAVIGATION
+# =========================================================
+st.set_page_config(page_title="CynapticsAI - Dream11 Predictor", layout="wide")
+st.sidebar.title("CynapticsAI Navigation")
 page = st.sidebar.radio("Select Interface", ["Interface 1: Product UI", "Interface 2: Model UI"])
 
 # =========================================================
@@ -70,7 +117,7 @@ page = st.sidebar.radio("Select Interface", ["Interface 1: Product UI", "Interfa
 # =========================================================
 if page == "Interface 1: Product UI":
     st.title("Interface 1: Product UI – Ultimate Team Selection Tool")
-    st.markdown("Recommend an optimal 11-player squad for fantasy cricket adhering strictly to Dream11 constraints.")
+    st.markdown("Recommend the optimal 11-player squad for an upcoming fantasy match adhering to Dream11 constraints.")
     
     col1, col2, col3 = st.columns(3)
     with col1:
@@ -80,50 +127,52 @@ if page == "Interface 1: Product UI":
     with col3:
         match_date = st.date_input("Match Date (>= 2024-07-01)", pd.to_datetime("2024-07-18"))
         
-    st.info("Strict Rule Enforced: Predictions are generated using 'ProductUI_Model' trained strictly on data prior to 2024-06-30.")
+    st.info("Strict Rule Enforced: Models must not use training data after 2024-06-30. Pretrained artifact 'ProductUI_Model' is loaded from `src/model_artifacts/`.")
 
     if st.button("Generate Recommended Dream Team"):
-        model_path = "src/model_artifacts/ProductUI_Model.pkl"
-        
+        # Resolve pretrained model location
+        model_path = resolve_path("src/model_artifacts/ProductUI_Model.pkl")
         if not os.path.exists(model_path):
-            st.error(f"Pretrained model file not found at `{model_path}`. Run `python3 src/train_product_model.py` first.")
+            model_path = resolve_path("src/model_artifacts/model_2024-06-30.pkl")
+            
+        if not os.path.exists(model_path):
+            st.error(f"Pretrained model file not found at `{model_path}`. Train a model in Interface 2 first.")
         elif df_all.empty:
-            st.error("No player container data found. Preprocessing incomplete.")
+            st.error("No player container data found in `data/processed/player_containers.json`.")
         else:
             with open(model_path, 'rb') as f:
                 model = pickle.load(f)
                 
             feature_cols = [c for c in df_all.columns if c.startswith("avg_") or c.startswith("max_") or c.startswith("std_")]
             
-            # Filter historical records prior to 2024-07-01
+            # Use player performance trends prior to 2024-07-01
             squad_df = df_all[df_all['match_date'] < pd.to_datetime("2024-07-01")].groupby('player_name').last().reset_index()
             
             if len(squad_df) < 11:
-                st.error("Not enough players available in historical dataset.")
+                st.error("Not enough historical player records available.")
             else:
                 squad_df['predicted_points'] = model.predict(squad_df[feature_cols])
                 
-                # Assign default teams & roles if missing in raw log
+                # Assign default team and role mappings if not present
                 squad_df['team'] = np.where(np.arange(len(squad_df)) % 2 == 0, team1, team2)
                 roles_cycle = ['BAT', 'BOWL', 'AR', 'WK']
                 squad_df['role'] = [roles_cycle[i % 4] for i in range(len(squad_df))]
                 
-                # Solve optimal team
+                # Run PuLP optimization to get best 11
                 selected_team = select_dream11_team(squad_df, 'predicted_points')
                 
-                st.subheader("Recommended 11-Player Dream Team")
+                st.subheader("Recommended 11-Player Squad")
                 st.dataframe(
                     selected_team[['player_name', 'team', 'role', 'predicted_points', 'avg_pts_last_5']],
                     use_container_width=True
                 )
                 
-                st.subheader("Player Contribution Justifications & Performance Trends")
-                for idx, row in selected_team.iterrows():
+                st.subheader("Player Contribution Justifications")
+                for _, row in selected_team.iterrows():
                     st.write(
                         f"• **{row['player_name']}** ({row['role']} | {row['team']}): "
-                        f"Predicted Fantasy Points: **{row['predicted_points']:.1f}**. "
-                        f"Recent 5-match average: **{row['avg_pts_last_5']:.1f}** pts. "
-                        f"Recommended role contribution: Key {row['role']} pick."
+                        f"Predicted Fantasy Points: **{row['predicted_points']:.1f}** | "
+                        f"Recent 5-match avg: **{row['avg_pts_last_5']:.1f}** pts."
                     )
 
 # =========================================================
@@ -131,7 +180,7 @@ if page == "Interface 1: Product UI":
 # =========================================================
 else:
     st.title("Interface 2: Model UI – Model Performance Analysis")
-    st.markdown("Assess model performance across specific training and testing date ranges, evaluate MAE, and save retrained model artifacts.")
+    st.markdown("Evaluate model accuracy on custom training/testing periods, view MAE metrics, and save updated model artifacts.")
     
     col1, col2 = st.columns(2)
     with col1:
@@ -144,11 +193,11 @@ else:
         test_start = st.date_input("Test Start Date", pd.to_datetime("2024-07-01"))
         test_end = st.date_input("Test End Date", pd.to_datetime("2024-09-22"))
 
-    if st.button("Train Model & Evaluate Test Set"):
+    if st.button("Train Model & Run Evaluation Pipeline"):
         if df_all.empty:
-            st.error("Dataset empty. Ensure `./data/processed/player_containers.json` exists.")
+            st.error("Player container dataset is empty. Ensure `data/processed/player_containers.json` exists.")
         else:
-            # 1. Filter Train Data
+            # Filter training and testing datasets
             train_mask = (df_all['match_date'] >= pd.to_datetime(train_start)) & (df_all['match_date'] <= pd.to_datetime(train_end))
             test_mask = (df_all['match_date'] >= pd.to_datetime(test_start)) & (df_all['match_date'] <= pd.to_datetime(test_end))
             
@@ -156,12 +205,12 @@ else:
             df_test = df_all[test_mask]
             
             if df_train.empty:
-                st.error("No training data found within selected training date range.")
+                st.error("No training data found within the selected training dates.")
             else:
                 feature_cols = [c for c in df_train.columns if c.startswith("avg_") or c.startswith("max_") or c.startswith("std_")]
                 X_train, y_train = df_train[feature_cols], df_train['target_points']
                 
-                # 2. Train AdaBoost Regressor
+                # Train AdaBoost Regressor
                 model = AdaBoostRegressor(
                     estimator=DecisionTreeRegressor(max_depth=4),
                     n_estimators=100,
@@ -170,21 +219,21 @@ else:
                 )
                 model.fit(X_train, y_train)
                 
-                # 3. Save Retrained Model & Training CSV
+                # Save Retrained Model & Training Dataset
                 str_train_end = train_end.strftime("%Y-%m-%d")
-                saved_csv_path = f"src/data/processed/training_data_{str_train_end}.csv"
-                saved_model_path = f"src/model_artifacts/model_{str_train_end}.pkl"
+                out_csv_path = os.path.join(PROCESSED_DATA_DIR, f"training_data_{str_train_end}.csv")
+                out_model_path = os.path.join(MODEL_ARTIFACTS_DIR, f"model_{str_train_end}.pkl")
                 
-                df_train.to_csv(saved_csv_path, index=False)
-                with open(saved_model_path, 'wb') as f:
+                df_train.to_csv(out_csv_path, index=False)
+                with open(out_model_path, 'wb') as f:
                     pickle.dump(model, f)
                     
-                st.success(f"Saved dataset: `{saved_csv_path}`")
-                st.success(f"Saved model artifact: `{saved_model_path}`")
+                st.success(f"Saved dataset: `{out_csv_path}`")
+                st.success(f"Saved model artifact: `{out_model_path}`")
                 
-                # 4. Evaluate Test Set Matches
+                # Test Set Evaluation Loop
                 if df_test.empty:
-                    st.warning("No test match records found within selected test date range.")
+                    st.warning("No test match records found within selected test dates.")
                 else:
                     results = []
                     
@@ -195,7 +244,6 @@ else:
                         m_group = m_group.copy()
                         m_group['predicted_points'] = model.predict(m_group[feature_cols])
                         
-                        # Apply default teams and roles if missing in raw data
                         teams = m_group['team'].unique()
                         t1 = str(teams[0]) if len(teams) > 0 else "Team 1"
                         t2 = str(teams[1]) if len(teams) > 1 else "Team 2"
@@ -203,19 +251,17 @@ else:
                         roles_cycle = ['BAT', 'BOWL', 'AR', 'WK']
                         m_group['role'] = [roles_cycle[i % 4] for i in range(len(m_group))]
                         
-                        # Get Predicted Best 11 & Actual Dream Team
+                        # Optimization for Predicted Team and Actual Dream Team
                         pred_team = select_dream11_team(m_group, 'predicted_points')
                         actual_team = select_dream11_team(m_group, 'target_points')
                         
-                        # Formats strictly required by problem statement
                         pred_players_str = ", ".join(pred_team['player_name'].tolist())
                         actual_players_str = ", ".join(actual_team['player_name'].tolist())
                         pred_points_str = ", ".join([f"{p:.1f}" for p in pred_team['predicted_points'].tolist()])
                         
+                        # MAE = Dream Team Fantasy Points - Predicted Team Fantasy Points
                         actual_pts_actual_team = actual_team['target_points'].sum()
                         actual_pts_pred_team = pred_team['target_points'].sum()
-                        
-                        # MAE = Total Fantasy Points of Actual Dream Team - Total Fantasy Points of Predicted Team
                         mae = actual_pts_actual_team - actual_pts_pred_team
                         
                         results.append({
@@ -232,7 +278,7 @@ else:
                     st.subheader("Test Evaluation Results")
                     st.dataframe(df_results, use_container_width=True)
                     
-                    # Download CSV Button
+                    # CSV Export Button
                     csv_data = df_results.to_csv(index=False).encode('utf-8')
                     st.download_button(
                         label="Download Evaluation Results CSV",
