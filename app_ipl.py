@@ -1,5 +1,16 @@
 import os
+import os
 import sys
+
+# 1. Update Python path FIRST (BEFORE any other imports)
+current_dir = os.path.dirname(os.path.abspath(__file__))
+parent_dir = os.path.dirname(current_dir)
+
+for path in [current_dir, parent_dir]:
+    if path not in sys.path:
+        sys.path.insert(0, path)
+
+# 2. NOW perform imports
 import json
 import pickle
 import numpy as np
@@ -7,16 +18,12 @@ import pandas as pd
 import streamlit as st
 from sklearn.ensemble import AdaBoostRegressor
 from sklearn.tree import DecisionTreeRegressor
-from src.optimizer import select_dream11_team
 
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-sys.path.append(os.path.abspath(os.path.dirname(__file__)))
-
+# 3. Import optimizer with fallback
 try:
     from src.optimizer import select_dream11_team
 except ModuleNotFoundError:
     from optimizer import select_dream11_team
-
 st.set_page_config(page_title="CynapticsAI - Dream11 Predictor", layout="wide")
 
 # Ensure required directories exist
