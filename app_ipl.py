@@ -10,7 +10,7 @@ from sklearn.ensemble import AdaBoostRegressor
 from sklearn.tree import DecisionTreeRegressor
 
 # =========================================================
-# 1. DYNAMIC PATH RESOLUTION
+# 1. DYNAMIC PATH RESOLUTION (Fixes Streamlit Cloud Paths)
 # =========================================================
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.abspath(os.path.join(CURRENT_DIR, ".."))
@@ -32,22 +32,21 @@ os.makedirs(MODEL_ARTIFACTS_DIR, exist_ok=True)
 os.makedirs(PROCESSED_DATA_DIR, exist_ok=True)
 
 # =========================================================
-# 2. PULP OPTIMIZER ENGINE (Cross-Version Fix)
+# 2. PULP OPTIMIZER ENGINE (Fixes TypeError)
 # =========================================================
 def select_dream11_team(df, points_col):
+    """
+    Selects 11 players maximizing `points_col` subject to Dream11 rules:
+    - Exactly 11 players
+    - 1 to 8 players for BAT, BOWL, AR, WK
+    - At least 1 player from each team
+    """
     match_df = df.copy().reset_index(drop=True)
     prob = pulp.LpProblem("Dream11_Selection", pulp.LpMaximize)
     indices = match_df.index
     
-    x = {}
-    for i in indices:
-        try:
-            x[i] = pulp.LpVariable(f"x_{i}", lowBound=0, upBound=1, cat=pulp.LpBinary)
-        except (TypeError, AttributeError):
-            try:
-                x[i] = pulp.LpVariable(f"x_{i}", 0, 1, pulp.LpBinary)
-            except (TypeError, AttributeError):
-                x[i] = pulp.LpVariable(f"x_{i}", lowBound=0, upBound=1, cat="Binary")
+    # Uses PuLP's built-in dict constructor to prevent TypeError across package versions
+    x = pulp.LpVariable.dicts("x", indices, cat=pulp.LpBinary)
     
     # Objective: Maximize total fantasy points
     prob += pulp.lpSum([x[i] * match_df.loc[i, points_col] for i in indices])
@@ -74,7 +73,7 @@ def select_dream11_team(df, points_col):
     return match_df.loc[selected_indices].sort_values(by=points_col, ascending=False)
 
 # =========================================================
-# 3. DATA LOADING & CACHING
+# 3. JSON CONTAINER DATA LOADING
 # =========================================================
 @st.cache_data
 def load_processed_data():
@@ -120,7 +119,7 @@ page = st.sidebar.radio("Select Interface", ["Interface 1: Product UI", "Interfa
 # INTERFACE 1: PRODUCT UI
 # =========================================================
 if page == "Interface 1: Product UI":
-    st.title("Interface 1: Product UI – Team Selection")
+    st.title("Interface 1: Product UI – Ultimate Team Selection Tool")
     st.markdown("Recommend the optimal 11-player squad for an upcoming fantasy match adhering to Dream11 constraints.")
     
     col1, col2, col3 = st.columns(3)
@@ -141,7 +140,7 @@ if page == "Interface 1: Product UI":
         if not os.path.exists(model_path):
             st.error(f"Pretrained model file not found at `{model_path}`. Train a model in Interface 2 first.")
         elif df_all.empty:
-            st.error("No player container data found in `data/processed/player_containers.json`.")
+            st.error(f"No player container data found at `{CONTAINER_PATH}`.")
         else:
             with open(model_path, 'rb') as f:
                 model = pickle.load(f)
@@ -164,12 +163,19 @@ if page == "Interface 1: Product UI":
                 st.subheader("Recommended 11-Player Squad")
                 disp_cols = [c for c in ['player_name', 'team', 'role', 'predicted_points'] if c in selected_team.columns]
                 st.dataframe(selected_team[disp_cols], use_container_width=True)
+                
+                st.subheader("Player Contribution Justifications")
+                for _, row in selected_team.iterrows():
+                    st.write(
+                        f"• **{row['player_name']}** ({row['role']} | {row['team']}): "
+                        f"Predicted Fantasy Points: **{row['predicted_points']:.1f}**"
+                    )
 
 # =========================================================
 # INTERFACE 2: MODEL UI
 # =========================================================
 else:
-    st.title("Interface 2: Model UI – Performance Analysis")
+    st.title("Interface 2: Model UI – Model Performance Analysis")
     st.markdown("Evaluate model accuracy on custom training/testing periods, view MAE metrics, and save updated model artifacts.")
     
     col1, col2 = st.columns(2)
@@ -185,7 +191,7 @@ else:
 
     if st.button("Train Model & Run Evaluation Pipeline"):
         if df_all.empty:
-            st.error("Player container dataset is empty. Ensure `data/processed/player_containers.json` exists.")
+            st.error(f"Player container dataset is empty. Ensure `{CONTAINER_PATH}` exists.")
         else:
             train_mask = (df_all['match_date'] >= pd.to_datetime(train_start)) & (df_all['match_date'] <= pd.to_datetime(train_end))
             test_mask = (df_all['match_date'] >= pd.to_datetime(test_start)) & (df_all['match_date'] <= pd.to_datetime(test_end))
@@ -194,7 +200,7 @@ else:
             df_test = df_all[test_mask]
             
             if df_train.empty:
-                st.error("No training data found within the selected training dates. Check your date range.")
+                st.error("No training data found within the selected training dates.")
             else:
                 exclude_cols = {'player_name', 'match_date', 'venue', 'target_points', 'team', 'role'}
                 feature_cols = [c for c in df_train.select_dtypes(include=[np.number]).columns if c not in exclude_cols]
@@ -281,4 +287,4 @@ else:
                                 mime="text/csv"
                             )
                         else:
-                            st.warning("Not enough match records (with >=11 players) in test period to generate evaluation results.")
+                            st.warning("Not enough match records in test period with >=11 players to construct full squads.")
