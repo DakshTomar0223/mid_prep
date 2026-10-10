@@ -6,18 +6,29 @@ RAW_DATA_DIR = "./data/raw/ipl"
 OUTPUT_FILE = "./data/processed/player_containers.json"
 
 def calculate_dream11_points(stats):
-    pts = 4.0  # XI baseline
-    runs = stats['runs']
-    pts += runs * 1 + stats['fours'] * 1 + stats['sixes'] * 2
-    if runs >= 50: pts += 8
+    runs = stats.get('runs', 0)
+    pts += runs * 1
+    pts += stats.get('fours', 0) * 1
+    pts += stats.get('sixes', 0) * 2
+    if runs >= 100: pts += 16
+    elif runs >= 50: pts += 8
     elif runs >= 30: pts += 4
+    if runs == 0 and stats.get('balls_faced', 0) > 0 and stats.get('role') != 'BOWL':
+        pts -= 2 
     
-    wickets = stats['wickets']
+    wickets = stats.get('wickets', 0)
     pts += wickets * 25
-    if wickets >= 3: pts += 4
+    if wickets >= 5: pts += 16
+    elif wickets >= 4: pts += 8
+    elif wickets >= 3: pts += 4
+    pts += stats.get('maidens', 0) * 12
+
+   pts += stats.get('catches', 0) * 8
+    pts += stats.get('stumpings', 0) * 12
+    pts += stats.get('run_outs', 0) * 6
     
-    pts += stats['catches'] * 8
     return pts
+
 
 def parse_match(file_path):
     with open(file_path, 'r') as f:
